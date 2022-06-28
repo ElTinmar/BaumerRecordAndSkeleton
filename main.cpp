@@ -22,6 +22,7 @@ using namespace std;
 #include "boost/program_options.hpp"
 #include "boost/filesystem.hpp"
 #include "boost/thread.hpp"
+#include "boost/chrono.hpp"
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 #include <armadillo>
@@ -44,6 +45,7 @@ ofstream skelfile;
 BGAPIX_TypeINT iTimeHigh, iTimeLow, iFreqHigh, iFreqLow;
 BGAPIX_CameraImageFormat cformat; 
 cv::Mat img_display;
+cv::Mat img_skel;
 cv::Mat background;
 std::vector<cv::Point> points;
 uint64_t first_ts = 0;
@@ -422,8 +424,10 @@ void display_preview() {
 	while (true) {
 		mtx.lock();
 		cv::imshow("Preview", img_display);
+		cv::imshow("Skeleton", img_skel);
 		mtx.unlock();
-		cv::waitKey(16);
+		cv::waitKey(32);
+		boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
 	}
 }
 
@@ -785,6 +789,21 @@ int setup_camera() {
 	}
 	cout << "Readout time: " << readouttime.current << endl;
 
+	return EXIT_SUCCESS;
+}
+
+int run_camera()
+{
+	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
+	BGAPI_FeatureState state; state.cbSize = sizeof(BGAPI_FeatureState);
+	BGAPIX_CameraStatistic statistics; statistics.cbSize = sizeof(BGAPIX_CameraStatistic);
+
+	res = pCamera->setFrameCounter(0, 0);
+	if (res != BGAPI_RESULT_OK) {
+		printf("BGAPI::Camera::setFrameCounter Errorcode: %d\n", res);
+		return EXIT_FAILURE;
+	}
+
 	// ALLOCATE BUFFERS 
 	res = pCamera->setDataAccessMode(BGAPI_DATAACCESSMODE_QUEUEDINTERN, numbuffer);
 	if (res != BGAPI_RESULT_OK)
@@ -794,7 +813,7 @@ int setup_camera() {
 	}
 
 	// dynamic allocation
-	pImage = new BGAPI::Image*[numbuffer];
+	pImage = new BGAPI::Image * [numbuffer];
 
 	int i = 0;
 	for (i = 0; i < numbuffer; i++)
@@ -819,20 +838,11 @@ int setup_camera() {
 	}
 	printf("Images allocated successful!\n");
 
-	res = pCamera->registerNotifyCallback(pCamera, (BGAPI::BGAPI_NOTIFY_CALLBACK) &imageCallback);
+	res = pCamera->registerNotifyCallback(pCamera, (BGAPI::BGAPI_NOTIFY_CALLBACK)&imageCallback);
 	if (res != BGAPI_RESULT_OK) {
 		printf("BGAPI::Camera::registerNotifyCallback Errorcode: %d\n", res);
 		return EXIT_FAILURE;
 	}
-
-	return EXIT_SUCCESS;
-}
-
-int run_camera()
-{
-	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
-	BGAPI_FeatureState state; state.cbSize = sizeof(BGAPI_FeatureState);
-	BGAPIX_CameraStatistic statistics; statistics.cbSize = sizeof(BGAPIX_CameraStatistic);
 
     res = pCamera->setStart(true);
     if(res != BGAPI_RESULT_OK) {
@@ -934,7 +944,7 @@ void process() {
 
 			if (((int)(current_timing) * 1000) % 100 == 0)
 			{
-				printf("FPS %.2f, Time elapsed : %d sec, encode buffer size %zd, skeleton buffer size %zd \r", fps_hat, (int)(current_timing), buflen, skelbuflen);
+				printf("FPS %.2f, elapsed : %d sec, bufsize %zd, skel bufsize %zd \r", fps_hat, (int)(current_timing), buflen, skelbuflen);
 				fflush(stdout);
 			}
 
@@ -947,125 +957,14 @@ void process() {
 
 			// make the image available for skeletonization
 			mtx_skel.lock();
-			SkeletonList.push_back(img_resized);
+			SkeletonList.push_back(img_resized.clone());
 			mtx_skel.unlock();
 		}
-	}
-}
-
-void onMouse(int evt, int x, int y, int flags, void* param) {
-	if (evt == CV_EVENT_LBUTTONDOWN) {
-		std::vector<cv::Point>* ptPtr = (std::vector<cv::Point>*)param;
-		ptPtr->push_back(cv::Point(x, y));
-	}
-}
-
-int compute_background() {
-
-	BGAPI::Image * Im = NULL;
-	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
-	cv::Mat img;
-
-	res = pCamera->setImagePolling(true);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("Error %d while set Image polling.\n", res);
-	}
-
-	//create an image 
-	res = BGAPI::createImage(&Im);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("Error %d while creating an image.\n", res);
-	}
-
-	//set the image to the camera 
-	res = pCamera->setImage(Im);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("Error %d while setting an image to the camera.\n", res);
-	}
-
-	res = pCamera->setStart(true);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("BGAPI::Camera::setStart returned with errorcode %d\n", res);
-	}
-
-	unsigned char* imagebuffer = NULL;
-	int receiveTimeout = 100;
-	background = cv::Mat(cv::Size(width, height), CV_32F, cv::Scalar(0));
-
-	for (int i = 0; i < 1000; i++)
-	{
-		res = pCamera->getImage(&Im, receiveTimeout);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI_Camera_getImage returned with errorcode %d\n", res);
-		}
-		else
-		{
-			Im->get(&imagebuffer);
-
-			img = cv::Mat(cv::Size(subsample * width, subsample * height), CV_8U, imagebuffer);
-			cv::resize(img, img, cv::Size(), 1.0 / subsample, 1.0 / subsample);
-			img.convertTo(img, CV_32F, 1.0 / 255.0);
-			background = 1.0 / 1000 * img + background;
-
-			//after you are ready with this image, return it to the camera for the next image
-			res = pCamera->setImage(Im);
-			if (res != BGAPI_RESULT_OK)
-			{
-				printf("setImage failed with %d\n", res);
-			}
+		else {
+			boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); 
 		}
 	}
-
-	//stop the camera when you are done with the capture
-	res = pCamera->setStart(false);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("BGAPI::Camera::setStart Errorcode: %d\n", res);
-	}
-
-	res = pCamera->setImagePolling(false);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("Error %d while set Image polling.\n", res);
-	}
-
-	res = BGAPI::releaseImage(Im);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("releaseImage Errorcode: %d\n", res);
-	}
-
-	cv::namedWindow("Select start");
-	cv::setMouseCallback("Select start", onMouse, (void*)&points);
-	while (true) {
-		cv::imshow("Select start", background);
-		if (points.size() > 0) {
-			break;
-		}
-		cv::waitKey(16);
-	}
-
-	cv::Rect2d fish_rect = cv::selectROI("Select fish", background, false);
-	cv::Mat mask = cv::Mat::zeros(background.rows, background.cols, CV_8U);
-	mask(fish_rect) = 1;
-	cv::inpaint(background, mask, background, 3, CV_INPAINT_TELEA);
-
-	cv::namedWindow("Background");
-	char exit_key_press = 0;
-	while (exit_key_press != 'q') {
-		cv::imshow("Background", background);
-		exit_key_press = cvWaitKey(16);
-	}
-	cv::destroyAllWindows();
-
-	return 0;
 }
-
 
 void skeletonize() {
 
@@ -1087,6 +986,8 @@ void skeletonize() {
 			frame = SkeletonList.front();
 			mtx_skel.unlock();
 
+			frame.copyTo(skeleton_rgb);
+			cv::cvtColor(skeleton_rgb, skeleton_rgb, cv::COLOR_GRAY2RGB);
 			frame.convertTo(frame, CV_32F, 1.0 / 255.0);
 
 			cv::absdiff(frame, background, bckg_sub);
@@ -1132,13 +1033,12 @@ void skeletonize() {
 				theta_frame(s - 1) = best_theta;
 			}
 
-			/*for (int s = 0; s < n_skel; s++) {
+			for (int s = 0; s < n_skel; s++) {
 				cv::circle(skeleton_rgb, cv::Point(skel_x(s), skel_y(s)), 4, cv::Scalar(0, 0, 255), 1);
 			}
 			for (int s = 0; s < n_skel - 1; s++) {
 				cv::line(skeleton_rgb, cv::Point(skel_x(s), skel_y(s)), cv::Point(skel_x(s + 1), skel_y(s + 1)), cv::Scalar(0, 0, 255));
 			}
-			cv::resize(skeleton_rgb, skeleton_rgb, cv::Size(), 2, 2);*/
 
 			// write to file
 			for (int s = 0; s < n_skel; s++) {
@@ -1146,7 +1046,7 @@ void skeletonize() {
 				skelfile << skel_y(s) << ",";
 			}
 			for (int s = 0; s < n_skel - 1; s++) {
-				if (s == n_skel - 1) {
+				if (s == n_skel - 2) {
 					skelfile << setprecision(5) << theta_frame(s);
 				}
 				else {
@@ -1155,22 +1055,141 @@ void skeletonize() {
 			}
 			skelfile << endl;
 
-			/*
-			// Display the resulting frame
-				cv::imshow("Skeleton", skeleton_rgb);
-				// Press  ESC on keyboard to exit
-				char c = (char)cv::waitKey(1);
-				if (c == 27)
-					break;*/
-			
+			mtx.lock();
+			skeleton_rgb.copyTo(img_skel);
+			mtx.unlock();
 
 			mtx_skel.lock();
 			SkeletonList.pop_front();
 			mtx_skel.unlock();
 		}
+		else {
+			boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+		}
 	}
 }
 
+void onMouse(int evt, int x, int y, int flags, void* param) {
+	if (evt == CV_EVENT_LBUTTONDOWN) {
+		std::vector<cv::Point>* ptPtr = (std::vector<cv::Point>*)param;
+		ptPtr->push_back(cv::Point(x, y));
+	}
+}
+
+int compute_background() {
+
+	cout << "Computing background" << endl;
+
+	BGAPI::Image * Im = NULL;
+	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
+	cv::Mat img;
+
+	res = pCamera->setImagePolling(true);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("Error %d while set Image polling.\n", res);
+	}
+
+	//create an image 
+	res = BGAPI::createImage(&Im);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("Error %d while creating an image.\n", res);
+	}
+
+	//set the image to the camera 
+	res = pCamera->setImage(Im);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("Error %d while setting an image to the camera.\n", res);
+	}
+
+	cout << "Image allocated, starting camera" << endl;
+
+	res = pCamera->setStart(true);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("BGAPI::Camera::setStart returned with errorcode %d\n", res);
+	}
+
+	unsigned char* imagebuffer = NULL;
+	int receiveTimeout = 100;
+	background = cv::Mat(cv::Size(width, height), CV_32F, cv::Scalar(0));
+
+	for (int i = 0; i < 1000; i++)
+	{
+		res = pCamera->getImage(&Im, receiveTimeout);
+		if (res != BGAPI_RESULT_OK)
+		{
+			printf("BGAPI_Camera_getImage returned with errorcode %d\n", res);
+		}
+		else
+		{
+			Im->get(&imagebuffer);
+
+			img = cv::Mat(cv::Size(width,height), CV_8U, imagebuffer);
+			img.convertTo(img, CV_32F, 1.0 / 255.0);
+			background = 1.0 / 1000 * img + background;
+
+			//after you are ready with this image, return it to the camera for the next image
+			res = pCamera->setImage(Im);
+			if (res != BGAPI_RESULT_OK)
+			{
+				printf("setImage failed with %d\n", res);
+			}
+		}
+	}
+
+	//stop the camera when you are done with the capture
+	res = pCamera->setStart(false);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("BGAPI::Camera::setStart Errorcode: %d\n", res);
+	}
+
+	cout << "Background acquisition done" << endl;
+
+	res = pCamera->setImagePolling(false);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("Error %d while set Image polling.\n", res);
+	}
+
+	res = BGAPI::releaseImage(Im);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("releaseImage Errorcode: %d\n", res);
+	}
+	
+	cout << "Select origin of the tail" << endl;
+
+	cv::namedWindow("Select start");
+	cv::setMouseCallback("Select start", onMouse, (void*)&points);
+	while (true) {
+		cv::imshow("Select start", background);
+		if (points.size() > 0) {
+			break;
+		}
+		cv::waitKey(16);
+	}
+
+	cout << "Select outline of the fish" << endl;
+
+	cv::Rect2d fish_rect = cv::selectROI("Select fish", background, false);
+	cv::Mat mask = cv::Mat::zeros(background.rows, background.cols, CV_8U);
+	mask(fish_rect) = 1;
+	cv::inpaint(background, mask, background, 10, CV_INPAINT_NS);
+
+	cv::namedWindow("Background");
+	char exit_key_press = 0;
+	while (exit_key_press != 'q') {
+		cv::imshow("Background", background);
+		exit_key_press = cvWaitKey(16);
+	}
+	cv::destroyAllWindows();
+
+	return 0;
+}
 
 int main(int ac, char* av[])
 {
@@ -1233,6 +1252,7 @@ int main(int ac, char* av[])
 		}
 
 		// Check if skeleton file exists
+		ss << setfill('0') << setw(2) << i-1;
 		fs::path skel = dir / (timestr + ss.str() + "_skeleton.txt");
 		if (exists(skel)) {
 			printf("skeleton file exists already, aborting\n");
@@ -1251,15 +1271,17 @@ int main(int ac, char* av[])
 	}
     
 	img_display = cv::Mat(height / subsample, width / subsample, CV_8UC1);
-	boost::thread bt(display_preview);
-	boost::thread bt1(process);
-	boost::thread bt2(skeletonize);
+	img_skel = cv::Mat(height / subsample, width / subsample, CV_8UC3);
 
 	// launch acquisition 
 	retcode = compute_background();
 	if (retcode == EXIT_FAILURE) {
 		return exit_gracefully(EXIT_FAILURE);
 	}
+
+	boost::thread bt(display_preview);
+	boost::thread bt1(process);
+	boost::thread bt2(skeletonize);
 
 	retcode = run_camera();
 	if (retcode == EXIT_FAILURE) {
@@ -1268,6 +1290,7 @@ int main(int ac, char* av[])
 
 	bt.interrupt();
 	bt1.interrupt();
+	bt2.interrupt();
 
 	// Stop the program 
 	return exit_gracefully(EXIT_SUCCESS);
