@@ -64,6 +64,7 @@ int exposuremax = 0;
 int triggers = 0;
 int fps = 0;
 int packetsizevalue = 0;
+int interpacketgapvalue = 0;
 int fpsmax = 0;
 int formatindex = 0;
 int formatindexmax = 0;
@@ -80,6 +81,7 @@ list<cv::Mat> SkeletonList; // list of images to compute skeleton
 list<double> timeStampsList; // list of image timings
 list<int> counterList; // list of image timings
 list<double> fpsList; // list of image timings
+list<int> hcounterList; // list of image timings
 
 boost::mutex mtx_skel;
 boost::mutex mtx_buffer;
@@ -113,7 +115,8 @@ int read_config(int ac, char* av[]) {
 			("fps", po::value<int>(&fps)->default_value(300), "fps")
 			("result_dir,d", po::value<string>(&result_dir)->default_value(""), "result directory")
 			("numbuffer,n", po::value<uint32_t>(&numbuffer)->default_value(100), "buffer size")
-			("packetsize", po::value<int>(&packetsizevalue)->default_value(576), "buffer size")
+			("packetsize", po::value<int>(&packetsizevalue)->default_value(576), "packet size")
+			("interpacketgap,f", po::value<int>(&interpacketgapvalue)->default_value(0), "IPG")
 			("exposuremax,e", po::value<uint32_t>(&exposuremax_slider)->default_value(3000), "max exposure slider")
 			("fpsmax,f", po::value<int>(&fpsmax_slider)->default_value(300), "max fps slider")
 			("n_skel", po::value<int>(&n_skel)->default_value(5), "number of skeleton points")
@@ -168,6 +171,7 @@ int read_config(int ac, char* av[]) {
 			<< "  Result directory: " << result_dir << endl
 			<< "  Buffer size: " << numbuffer << endl
 			<< "  Packet size: " << packetsizevalue << endl
+			<< "  Inter Packet Gap: " << interpacketgapvalue << endl
 			<< "  Max exposure slider: " << exposuremax_slider << endl
 			<< "  Max fps slider: " << fpsmax_slider << endl
 			<< "  Number of skeleton points: " << n_skel << endl
@@ -230,6 +234,7 @@ BGAPI_RESULT BGAPI_CALLBACK imageCallback(void * callBackOwner, BGAPI::Image* pC
 	ImageList.push_back(img.clone()); // image memory buffer
 	timeStampsList.push_back(current_time); // timing buffer
 	counterList.push_back(swc);
+	hcounterList.push_back(hwc);
 	fpsList.push_back(fps_hat);
 	mtx_buffer.unlock();
 
@@ -444,6 +449,7 @@ int setup_camera() {
 	BGAPIX_TypeRangeFLOAT sensorfreq;
 	BGAPIX_TypeINT readouttime;
 	BGAPIX_TypeRangeINT packetsize;
+	BGAPIX_TypeINT tPacketDelay;
 	BGAPIX_TypeListINT driverlist;
 
 	cformat.cbSize = sizeof(BGAPIX_CameraImageFormat);
@@ -461,6 +467,7 @@ int setup_camera() {
 	sensorfreq.cbSize = sizeof(BGAPIX_TypeRangeFLOAT);
 	readouttime.cbSize = sizeof(BGAPIX_TypeINT);
 	packetsize.cbSize = sizeof(BGAPIX_TypeRangeINT);
+	tPacketDelay.cbSize = sizeof(BGAPIX_TypeINT);
 	driverlist.cbSize = sizeof(BGAPIX_TypeListINT);
 
 	// Initializing the system--------------------------------------------------
@@ -759,6 +766,20 @@ int setup_camera() {
 	}
 	cout << "Packet size: "  << packetsize.current << ", Max: " << packetsize.maximum << ", Min: " << packetsize.minimum << endl;
 
+	// set interpacket delay to optimize performance
+	res = pCamera->setGVSPacketDelay(interpacketgapvalue);
+	if (res != BGAPI_RESULT_OK) {
+		printf("BGAPI::Camera::getPacketSize Errorcode: %d\n", res);
+		return EXIT_FAILURE;
+	}
+
+	res = pCamera->getGVSPacketDelay(&state, &tPacketDelay);
+	if (res != BGAPI_RESULT_OK) {
+		printf("BGAPI::Camera::getPacketSize Errorcode: %d\n", res);
+		return EXIT_FAILURE;
+	}
+	cout << "Packet delay: " << tPacketDelay.current << endl;
+
 	// Resend algorithm: default values are probably fine
 	res = pCamera->getGVSResendValues(&state, &resendvalues);
 	if (res != BGAPI_RESULT_OK) {
@@ -912,6 +933,7 @@ void process() {
 	cv::Mat img_resized;
 	double current_timing = 0;
 	int swc = 0;
+	int hwc = 0;
 	double fps_hat = 0;
 
 	while (true)
@@ -922,6 +944,7 @@ void process() {
 			current_image = ImageList.front();
 			current_timing = timeStampsList.front();
 			swc = counterList.front();
+			hwc = hcounterList.front();
 			fps_hat = fpsList.front();
 			mtx_buffer.unlock();
 
@@ -932,7 +955,7 @@ void process() {
 
 			// compress image
 			if (!preview) {
-				file << swc << "\t" << setprecision(3) << std::fixed << 1000 * current_timing << std::endl;
+				file << swc << "\t" << setprecision(3) << std::fixed << 1000 * current_timing << "\t" << hwc << std::endl;
 				writer << img_resized;
 			}
 
@@ -952,6 +975,7 @@ void process() {
 			ImageList.pop_front();
 			timeStampsList.pop_front();
 			counterList.pop_front();
+			hcounterList.pop_front();
 			fpsList.pop_front();
 			mtx_buffer.unlock();
 
