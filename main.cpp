@@ -1107,6 +1107,22 @@ int compute_background() {
 	BGAPI::Image * Im = NULL;
 	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
 	cv::Mat img;
+	BGAPI_FeatureState state;
+	state.cbSize = sizeof(BGAPI_FeatureState);
+	int trigstate;
+
+	res = pCamera->getTrigger(&state);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("BGAPI::Camera::getTrigger Errorcode: %d\n", res);
+	}
+	trigstate = state.bIsEnabled;
+
+	res = pCamera->setTrigger(false);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("BGAPI::Camera::setTrigger Errorcode: %d\n", res);
+	}
 
 	res = pCamera->setImagePolling(true);
 	if (res != BGAPI_RESULT_OK)
@@ -1183,6 +1199,12 @@ int compute_background() {
 	if (res != BGAPI_RESULT_OK)
 	{
 		printf("releaseImage Errorcode: %d\n", res);
+	}
+
+	res = pCamera->setTrigger(trigstate);
+	if (res != BGAPI_RESULT_OK)
+	{
+		printf("BGAPI::Camera::setTrigger Errorcode: %d\n", res);
 	}
 	
 	cout << "Select origin of the tail" << endl;
