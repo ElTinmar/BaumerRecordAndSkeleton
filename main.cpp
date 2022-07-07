@@ -27,13 +27,10 @@ namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 #include <armadillo>
 
-
-// PARAMETERS-------------------------------------------------------------------
-int preview;				
-int subsample;
-string result_dir;			
+		
 
 // Global variables-------------------------------------------------------------
+string result_dir;
 int sys = 0;
 int cam = 0;
 BGAPI::System * pSystem = NULL;
@@ -69,8 +66,12 @@ int fpsmax = 0;
 int formatindex = 0;
 int formatindexmax = 0;
 uint32_t numbuffer = 0;
-uint32_t exposuremax_slider = 0;
-int fpsmax_slider = 0;
+double current_timing = 0;
+double fps_hat = 0;
+size_t buflen = 0;
+size_t skelbuflen = 0;
+int curswc = 0;
+int curhwc = 0;
 
 int n_skel = 5;
 int length_tail = 180;
@@ -102,8 +103,6 @@ int read_config(int ac, char* av[]) {
 		// both on command line and config file
 		po::options_description config("Configuration");
 		config.add_options()
-			("preview,p", po::value<int>(&preview)->default_value(1), "preview")
-			("subsample,b", po::value<int>(&subsample)->default_value(1), "subsampling factor")
 			("left", po::value<int>(&roi_left)->default_value(1), "ROI left")
 			("top", po::value<int>(&roi_top)->default_value(1), "ROI top")
 			("right", po::value<int>(&roi_right)->default_value(1), "ROI right")
@@ -117,8 +116,6 @@ int read_config(int ac, char* av[]) {
 			("numbuffer,n", po::value<uint32_t>(&numbuffer)->default_value(100), "buffer size")
 			("packetsize", po::value<int>(&packetsizevalue)->default_value(576), "packet size")
 			("interpacketgap,f", po::value<int>(&interpacketgapvalue)->default_value(0), "IPG")
-			("exposuremax,e", po::value<uint32_t>(&exposuremax_slider)->default_value(3000), "max exposure slider")
-			("fpsmax,f", po::value<int>(&fpsmax_slider)->default_value(300), "max fps slider")
 			("n_skel", po::value<int>(&n_skel)->default_value(5), "number of skeleton points")
 			("length_tail", po::value<int>(&length_tail)->default_value(180), "length of the tail")
 			;
@@ -155,8 +152,6 @@ int read_config(int ac, char* av[]) {
 		height = roi_bottom - roi_top;
 
 		cout << "Running with following options " << endl
-			<< "  Preview: " << preview << endl
-			<< "  Subsample: " << subsample << endl
 			<< "  Left: " << roi_left << endl
 			<< "  Top: " << roi_top << endl
 			<< "  Right: " << roi_right << endl
@@ -172,8 +167,6 @@ int read_config(int ac, char* av[]) {
 			<< "  Buffer size: " << numbuffer << endl
 			<< "  Packet size: " << packetsizevalue << endl
 			<< "  Inter Packet Gap: " << interpacketgapvalue << endl
-			<< "  Max exposure slider: " << exposuremax_slider << endl
-			<< "  Max fps slider: " << fpsmax_slider << endl
 			<< "  Number of skeleton points: " << n_skel << endl
 			<< "  Length of the tail: " << length_tail << endl;
 			
@@ -245,187 +238,9 @@ BGAPI_RESULT BGAPI_CALLBACK imageCallback(void * callBackOwner, BGAPI::Image* pC
 	return res;
 }
 
-static void trackbar_callback(int,void*) {
-
-	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
-	BGAPI_FeatureState state; 
-	BGAPIX_TypeROI roi;
-	BGAPIX_TypeRangeFLOAT gain;
-	BGAPIX_TypeRangeINT exposure;
-	BGAPIX_TypeRangeFLOAT framerate;
-	BGAPIX_TypeListINT imageformat;
-	BGAPI_Resend resendvalues;
-	BGAPIX_TypeRangeFLOAT sensorfreq;
-	BGAPIX_TypeINT readouttime;
-	BGAPIX_TypeRangeINT packetsize;
-
-
-	state.cbSize = sizeof(BGAPI_FeatureState);
-	roi.cbSize = sizeof(BGAPIX_TypeROI);
-	gain.cbSize = sizeof(BGAPIX_TypeRangeFLOAT);
-	exposure.cbSize = sizeof(BGAPIX_TypeRangeINT);
-	framerate.cbSize = sizeof(BGAPIX_TypeRangeFLOAT);
-	imageformat.cbSize = sizeof(BGAPIX_TypeListINT);
-	resendvalues.cbSize = sizeof(BGAPI_Resend);
-	sensorfreq.cbSize = sizeof(BGAPIX_TypeRangeFLOAT);
-	readouttime.cbSize = sizeof(BGAPIX_TypeINT);
-	packetsize.cbSize = sizeof(BGAPIX_TypeRangeINT);
-
-	// FORMAT INDEX : this goes first ?
-	res = pCamera->setImageFormat(formatindex);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setImageFormat Errorcode: %d\n", res);
-	}
-
-	res = pCamera->getImageFormat(&state, &imageformat);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setImageFormat Errorcode: %d\n", res);
-	}
-	formatindex = imageformat.current;
-
-	res = pCamera->getImageFormatDescription(formatindex, &cformat);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::getImageFormatDescription Errorcode: %d\n", res);
-	}
-
-	// ROI
-	// check dimensions 
-	if ((roi_left + width > cformat.iSizeX) || (roi_top + height > cformat.iSizeY)) {
-		printf("Image size is not compatible with selected format\n");
-	}
-
-	res = pCamera->setPartialScan(1, roi_left, roi_top, roi_left + width, roi_top + height);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setPartialScan Errorcode: %d\n", res);
-	}
-
-	res = pCamera->getPartialScan(&state, &roi);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::getImageFormat Errorcode: %d\n", res);
-	}
-
-	roi_left = roi.curleft;
-	roi_top = roi.curtop;
-	roi_right = roi.curright;
-	roi_bottom = roi.curbottom;
-	width = roi.curright - roi.curleft;
-	height = roi.curbottom - roi.curtop;
-
-	// change size of display accordingly
-	mtx.lock();
-	img_display = cv::Mat(height / subsample, width / subsample, CV_8UC1);
-	mtx.unlock();
-	// change image size -> detach and reallocate images (only if using external buffer)  
-
-	// GAIN
-	res = pCamera->setGain(gainvalue);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setGain Errorcode: %d\n", res);
-	}
-
-	res = pCamera->getGain(&state, &gain);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setGain Errorcode: %d\n", res);
-	}
-	gainvalue = gain.current;
-
-	// EXPOSURE 
-	res = pCamera->setExposure(exposurevalue);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setExposure Errorcode: %d\n", res);
-	}
-
-	res = pCamera->getExposure(&state, &exposure);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::setExposure Errorcode: %d\n", res);
-	}
-	exposurevalue = exposure.current;
-
-	// TRIGGERS
-	if (triggers) {
-		res = pCamera->setTriggerSource(BGAPI_TRIGGERSOURCE_HARDWARE1);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTriggerSource Errorcode: %d\n", res);
-		}
-
-		res = pCamera->setTrigger(true);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTrigger Errorcode: %d\n", res);
-		}
-
-		res = pCamera->setTriggerActivation(BGAPI_ACTIVATION_RISINGEDGE);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTriggerActivation Errorcode: %d\n", res);
-		}
-
-		res = pCamera->setTriggerDelay(0);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTriggerDelay Errorcode: %d\n", res);
-		}
-	}
-	else {
-		res = pCamera->setTriggerSource(BGAPI_TRIGGERSOURCE_SOFTWARE);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTriggerSource Errorcode: %d\n", res);
-		}
-
-		res = pCamera->setTrigger(false);
-		if (res != BGAPI_RESULT_OK)
-		{
-			printf("BGAPI::Camera::setTrigger Errorcode: %d\n", res);
-		}
-
-		// FPS: maybe do that only in preview mode without triggers ?
-		res = pCamera->setFramesPerSecondsContinuous(fps);
-		if (res != BGAPI_RESULT_OK) {
-			printf("BGAPI::Camera::setFramesPerSecondsContinuous Errorcode: %d\n", res);
-		}
-
-		res = pCamera->getFramesPerSecondsContinuous(&state, &framerate);
-		if (res != BGAPI_RESULT_OK) {
-			printf("BGAPI::Camera::getFramesPerSecondsContinuous Errorcode: %d\n", res);
-		}
-		fps = framerate.current;
-	}
-	res = pCamera->getTrigger(&state);
-	if (res != BGAPI_RESULT_OK)
-	{
-		printf("BGAPI::Camera::getTrigger Errorcode: %d\n", res);
-	}
-	triggers = state.bIsEnabled;
-
-	res = pCamera->getReadoutTime(&state, &readouttime);
-	if (res != BGAPI_RESULT_OK) {
-		printf("BGAPI::Camera::getReadoutTime Errorcode: %d\n", res);
-	}
-	cout << "Readout time: " << readouttime.current << endl;
-	
-	cv::setTrackbarMax("ROI height", "Controls", cformat.iSizeY);
-	cv::setTrackbarMax("ROI width", "Controls", cformat.iSizeX);
-	cv::setTrackbarMax("ROI left", "Controls", cformat.iSizeX);
-	cv::setTrackbarMax("ROI top", "Controls", cformat.iSizeY);
-}
-
 void display_preview() {
 
 	cv::namedWindow("Preview", cv::WINDOW_AUTOSIZE);
-	if (preview) {
-		cv::namedWindow("Controls", cv::WINDOW_NORMAL);
-		cv::createTrackbar("ROI left", "Controls", &roi_left, cformat.iSizeX, trackbar_callback);
-		cv::createTrackbar("ROI top", "Controls", &roi_top, cformat.iSizeY, trackbar_callback);
-		cv::createTrackbar("ROI width", "Controls", &width, cformat.iSizeX, trackbar_callback);
-		cv::createTrackbar("ROI height", "Controls", &height, cformat.iSizeY, trackbar_callback);
-		cv::createTrackbar("Exposure", "Controls", &exposurevalue, exposuremax_slider, trackbar_callback);
-		cv::createTrackbar("Gain", "Controls", &gainvalue, gainmax, trackbar_callback);
-		cv::createTrackbar("FPS", "Controls", &fps, fpsmax_slider, trackbar_callback);
-		cv::createTrackbar("Triggers", "Controls", &triggers, 1, trackbar_callback);
-		cv::createTrackbar("Format Index", "Controls", &formatindex, formatindexmax, trackbar_callback);
-	}
 	while (true) {
 		mtx.lock();
 		cv::imshow("Preview", img_display);
@@ -566,7 +381,7 @@ int setup_camera() {
 
 	// change size of display accordingly
 	mtx.lock();
-	img_display = cv::Mat(height/subsample, width / subsample, CV_8UC1);
+	img_display = cv::Mat(height, width, CV_8UC1);
 	mtx.unlock();
 
 	// GAIN
@@ -918,10 +733,8 @@ int exit_gracefully(int exitcode) {
 	delete[] pImage;
 
 	// Stop the program and release resources 
-	if (!preview) {
-		file.close();
-		skelfile.close();
-	}
+	file.close();
+	skelfile.close();
 
 	cv::destroyAllWindows();
 	return exitcode;
@@ -930,11 +743,6 @@ int exit_gracefully(int exitcode) {
 void process() {
 
 	cv::Mat current_image;
-	cv::Mat img_resized;
-	double current_timing = 0;
-	int swc = 0;
-	int hwc = 0;
-	double fps_hat = 0;
 
 	while (true)
 	{
@@ -943,33 +751,26 @@ void process() {
 			mtx_buffer.lock();
 			current_image = ImageList.front();
 			current_timing = timeStampsList.front();
-			swc = counterList.front();
-			hwc = hcounterList.front();
+			curswc = counterList.front();
+			curhwc = hcounterList.front();
 			fps_hat = fpsList.front();
 			mtx_buffer.unlock();
 
-			size_t buflen = ImageList.size();
-			size_t skelbuflen = SkeletonList.size();
-
-			cv::resize(current_image, img_resized, cv::Size(), 1.0 / subsample, 1.0 / subsample);
+			buflen = ImageList.size();
+			skelbuflen = SkeletonList.size();
 
 			// compress image
-			if (!preview) {
-				file << swc << "\t" << setprecision(3) << std::fixed << 1000 * current_timing << "\t" << hwc << std::endl;
-				writer << img_resized;
-			}
+			file << curswc << "\t"
+				<< setprecision(3) << std::fixed << 1000 * current_timing << "\t" 
+				<< curhwc << std::endl;
+
+			writer << current_image;
 
 			// if you want to do online processing of the images, it should go here
 
 			mtx.lock();
-			img_resized.copyTo(img_display);
+			current_image.copyTo(img_display);
 			mtx.unlock();
-
-			if (((int)(current_timing) * 1000) % 100 == 0)
-			{
-				printf("FPS %.2f, elapsed : %d sec, bufsize %zd, skel bufsize %zd \r", fps_hat, (int)(current_timing), buflen, skelbuflen);
-				fflush(stdout);
-			}
 
 			mtx_buffer.lock();
 			ImageList.pop_front();
@@ -980,9 +781,11 @@ void process() {
 			mtx_buffer.unlock();
 
 			// make the image available for skeletonization
-			mtx_skel.lock();
-			SkeletonList.push_back(img_resized.clone());
-			mtx_skel.unlock();
+			if ((curswc % 2) == 0) {
+				mtx_skel.lock();
+				SkeletonList.push_back(current_image.clone());
+				mtx_skel.unlock();
+			}
 		}
 		else {
 			boost::this_thread::sleep_for(boost::chrono::milliseconds(1)); 
@@ -1237,6 +1040,42 @@ int compute_background() {
 	return 0;
 }
 
+
+void camera_stats() {
+
+	BGAPI_RESULT res = BGAPI_RESULT_FAIL;
+	BGAPI_FeatureState state; state.cbSize = sizeof(BGAPI_FeatureState);
+	BGAPIX_CameraStatistic statistics; statistics.cbSize = sizeof(BGAPIX_CameraStatistic);
+
+	while (true)
+	{
+		res = pCamera->getStatistic(&state, &statistics);
+		if (res != BGAPI_RESULT_OK) {
+			printf("BGAPI::Camera::getStatistic Errorcode: %d\n", res);
+		}
+
+		cout << "swc: " << curswc << endl
+			<< "hwc: " << curhwc << endl
+			<< "FPS: " << fps_hat << endl
+			<< "Time elapsed: " << current_timing << endl
+			<< "Buffer size: " << buflen << endl
+			<< "Skeleton Buffer size: " << skelbuflen << endl
+			<< endl
+			<< "Camera statistics:" << endl
+			<< "  Received Frames Good: " << statistics.statistic[0] << endl
+			<< "  Received Frames Corrupted: " << statistics.statistic[1] << endl
+			<< "  Lost Frames: " << statistics.statistic[2] << endl
+			<< "  Resend Requests: " << statistics.statistic[3] << endl
+			<< "  Resend Packets: " << statistics.statistic[4] << endl
+			<< "  Lost Packets: " << statistics.statistic[5] << endl
+			<< "  Bandwidth: " << statistics.statistic[6] << endl
+			<< endl;
+
+		boost::this_thread::sleep_for(boost::chrono::milliseconds(500)); // interruption point
+	}
+}
+
+
 int main(int ac, char* av[])
 {
 	int retcode = 0;
@@ -1258,66 +1097,64 @@ int main(int ac, char* av[])
 	}
 	printf("Camera setup complete\n");
 
-	if (!preview) {
-		// Check if result directory exists
-		fs::path dir(result_dir);
-		if (!exists(dir)) {
-			if (!fs::create_directory(dir)) {
-				cout << "unable to create result directory, aborting" << endl;
-				return exit_gracefully(1);
-			}
-		}
-
-		// Get formated time string 
-		time_t now;
-		struct tm* timeinfo;
-		char buffer[100];
-		time(&now);
-		timeinfo = localtime(&now);
-		strftime(buffer, sizeof(buffer), "%Y_%m_%d_", timeinfo);
-		string timestr(buffer);
-
-		// Check if video file exists
-		fs::path video;
-		stringstream ss;
-		int i = 0;
-		do {
-			ss << setfill('0') << setw(2) << i;
-			video = dir / (timestr + ss.str() + ".avi");
-			i++;
-			ss.str("");
-		} while (exists(video));
-		char videoname[100];
-		wcstombs(videoname, video.c_str(), 100);
-
-		// Check if timestamps file exists
-		fs::path ts = video.replace_extension("txt");
-		if (exists(ts)) {
-			printf("timestamp file exists already, aborting\n");
+	// Check if result directory exists
+	fs::path dir(result_dir);
+	if (!exists(dir)) {
+		if (!fs::create_directory(dir)) {
+			cout << "unable to create result directory, aborting" << endl;
 			return exit_gracefully(1);
 		}
-
-		// Check if skeleton file exists
-		ss << setfill('0') << setw(2) << i-1;
-		fs::path skel = dir / (timestr + ss.str() + "_skeleton.txt");
-		if (exists(skel)) {
-			printf("skeleton file exists already, aborting\n");
-			return exit_gracefully(1);
-		}
-
-		writer.open(videoname, cv::VideoWriter::fourcc('X', '2', '6', '4'), 24, cv::Size(width, height), 0);
-		if (!writer.isOpened()) {
-			printf("Problem opening Video writer, aborting\n");
-			return exit_gracefully(1);
-		}
-
-		// Create timestamps file
-		file.open(ts.string());
-		skelfile.open(skel.string());
 	}
+
+	// Get formated time string 
+	time_t now;
+	struct tm* timeinfo;
+	char buffer[100];
+	time(&now);
+	timeinfo = localtime(&now);
+	strftime(buffer, sizeof(buffer), "%Y_%m_%d_", timeinfo);
+	string timestr(buffer);
+
+	// Check if video file exists
+	fs::path video;
+	stringstream ss;
+	int i = 0;
+	do {
+		ss << setfill('0') << setw(2) << i;
+		video = dir / (timestr + ss.str() + ".avi");
+		i++;
+		ss.str("");
+	} while (exists(video));
+	char videoname[100];
+	wcstombs(videoname, video.c_str(), 100);
+
+	// Check if timestamps file exists
+	fs::path ts = video.replace_extension("txt");
+	if (exists(ts)) {
+		printf("timestamp file exists already, aborting\n");
+		return exit_gracefully(1);
+	}
+
+	// Check if skeleton file exists
+	ss << setfill('0') << setw(2) << i-1;
+	fs::path skel = dir / (timestr + ss.str() + "_skeleton.txt");
+	if (exists(skel)) {
+		printf("skeleton file exists already, aborting\n");
+		return exit_gracefully(1);
+	}
+
+	writer.open(videoname, cv::VideoWriter::fourcc('X', '2', '6', '4'), 24, cv::Size(width, height), 0);
+	if (!writer.isOpened()) {
+		printf("Problem opening Video writer, aborting\n");
+		return exit_gracefully(1);
+	}
+
+	// Create timestamps file
+	file.open(ts.string());
+	skelfile.open(skel.string());
     
-	img_display = cv::Mat(height / subsample, width / subsample, CV_8UC1);
-	img_skel = cv::Mat(height / subsample, width / subsample, CV_8UC3);
+	img_display = cv::Mat(height, width, CV_8UC1);
+	img_skel = cv::Mat(height, width, CV_8UC3);
 
 	// launch acquisition 
 	retcode = compute_background();
@@ -1328,6 +1165,7 @@ int main(int ac, char* av[])
 	boost::thread bt(display_preview);
 	boost::thread bt1(process);
 	boost::thread bt2(skeletonize);
+	boost::thread bt3(camera_stats);
 
 	retcode = run_camera();
 	if (retcode == EXIT_FAILURE) {
@@ -1337,6 +1175,7 @@ int main(int ac, char* av[])
 	bt.interrupt();
 	bt1.interrupt();
 	bt2.interrupt();
+	bt3.interrupt();
 
 	// Stop the program 
 	return exit_gracefully(EXIT_SUCCESS);
